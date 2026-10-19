@@ -87,7 +87,7 @@ function get(url) {
     const request = http.get(url, (res) => {
       let body = '';
       res.on('data', (c) => { body += c; });
-      res.on('end', () => resolve({ status: res.statusCode, body }));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
     });
     request.on('error', reject);
     request.setTimeout(2000, () => request.destroy(new Error('timeout')));
@@ -260,6 +260,18 @@ function hammer(url, durationMs, concurrency = 4) {
   check('every instance has its own pid', api.pids.length === 3, JSON.stringify(api.pids));
   api.pids.forEach((pid) => startedPids.add(pid));
 
+  // Port discovery: the container wraps net.Server#listen, so each instance
+  // reports the port it really bound. Cluster shares one listener, so the three
+  // reports must collapse into a single port.
+  await waitFor('the bound port is discovered from the app itself', () => {
+    const row = find('api');
+    return Array.isArray(row.ports) && row.ports.length === 1 && row.ports[0] === apiPort;
+  });
+  check('three instances sharing one port are reported once', JSON.stringify(find('api').ports) === JSON.stringify([apiPort]), JSON.stringify(find('api').ports));
+  check('describe exposes the bound port', JSON.parse(cli(['describe', 'api']).stdout).ports.includes(apiPort));
+  const apiTable = cli(['list']).stdout;
+  check('the table renders the port in its own column', apiTable.includes('port') && apiTable.includes(String(apiPort)), apiTable.split('\n').slice(0, 3).join(' | '));
+
   const rr = await hammer(`http://127.0.0.1:${apiPort}/health`, 600, 6);
   check('the load balancer spreads connections across all 3 instances', rr.pids.size === 3, `pids=${[...rr.pids].join(',')}`);
 
@@ -284,6 +296,20 @@ function hammer(url, durationMs, concurrency = 4) {
   await waitFor('scale down retires the extra workers', () => find('api').instances === 1);
   cli(['scale', 'api', '2']);
   await waitFor('scale up adds workers back', () => find('api').instances === 2, 6000);
+  find('api').pids.forEach((pid) => startedPids.add(pid));
+
+  // A port is owned by a live process: a stopped app must stop advertising it,
+  // and a restart must rediscover it.
+  cli(['stop', 'api']);
+  await waitFor('a stopped app advertises no port', () => {
+    const row = find('api');
+    return row.status === 'stopped' && row.ports.length === 0 && row.port === null;
+  });
+  cli(['restart', 'api']);
+  await waitFor('restart rediscovers the port of every instance', () => {
+    const row = find('api');
+    return row.status === 'online' && row.instances === 2 && JSON.stringify(row.ports) === JSON.stringify([apiPort]);
+  });
   find('api').pids.forEach((pid) => startedPids.add(pid));
   cli(['delete', 'api']);
 
@@ -390,11 +416,23 @@ function hammer(url, durationMs, concurrency = 4) {
   section('dashboard');
   const webPort = await freePort();
   cli(['start', path.join(ROOT, 'examples', 'app.js'), '--name', 'dash']);
+  await waitFor('the port is discovered even when the app asks for a random one', () => {
+    const row = find('dash');
+    return Array.isArray(row.ports) && row.ports.length === 1 && row.ports[0] > 0;
+  });
   const webStart = cli(['web', '--port', String(webPort)]);
   check('the dashboard starts on the requested port', webStart.stdout.includes(`127.0.0.1:${webPort}`), webStart.stdout + webStart.stderr);
   const apiPayload = JSON.parse((await get(`http://127.0.0.1:${webPort}/api/processes`)).body);
   check('the api lists processes', apiPayload.processes.length === 1 && apiPayload.processes[0].name === 'dash', JSON.stringify(apiPayload.processes));
-  check('the html page is served', (await get(`http://127.0.0.1:${webPort}/`)).body.includes('<table>'));
+  check('the api exposes the bound port', JSON.stringify(apiPayload.processes[0].ports) === JSON.stringify(find('dash').ports), JSON.stringify(apiPayload.processes[0].ports));
+  const dashPage = await get(`http://127.0.0.1:${webPort}/`);
+  check('the html page is served', dashPage.body.includes('<table>'));
+  check('the page has a port column', dashPage.body.includes('data-sort="port"'));
+  check('the page ships a nonce-based CSP and no-store',
+    /script-src 'nonce-[^']+'/.test(dashPage.headers['content-security-policy'] || '') &&
+    /<script nonce="[^"]+">/.test(dashPage.body) &&
+    dashPage.headers['cache-control'] === 'no-store',
+    JSON.stringify({ csp: dashPage.headers['content-security-policy'], cache: dashPage.headers['cache-control'] }));
   const dashPidBefore = find('dash').pid;
   check('the restart action works', (await post(`http://127.0.0.1:${webPort}/api/action/${find('dash').id}/restart`)).status === 200);
   check('the action really restarted the process', find('dash').pid !== dashPidBefore);
@@ -488,6 +526,8 @@ function hammer(url, durationMs, concurrency = 4) {
   const neverWaited = Date.now() - neverStarted;
   check('a missing ready signal is bounded by --listen-timeout', neverWaited >= 550 && neverWaited < 5000, `${neverWaited}ms`);
   check('the app is online even though it never signalled', find('never').status === 'online', JSON.stringify(find('never')));
+  const neverRow = find('never');
+  check('an app that binds no port reports none', Array.isArray(neverRow.ports) && neverRow.ports.length === 0 && neverRow.port === null, JSON.stringify({ port: neverRow.port, ports: neverRow.ports }));
   startedPids.add(find('never').pid);
   cli(['delete', 'never']);
 
@@ -514,10 +554,13 @@ function hammer(url, durationMs, concurrency = 4) {
   // ==================================================================== monit ==
   section('monit');
   cli(['start', path.join(ROOT, 'examples', 'app.js'), '--name', 'observed']);
+  await waitFor('the observed app reports its port', () => (find('observed').ports || []).length === 1);
   const snapshot = cli(['monit']);
   check('monit prints one snapshot when stdout is not a tty',
     snapshot.status === 0 && /observed/.test(snapshot.stdout) && /status/.test(snapshot.stdout), snapshot.stdout.slice(0, 120) + snapshot.stderr);
   check('monit says so when it cannot draw the live view', /not a tty/.test(snapshot.stderr), snapshot.stderr);
+  check('the snapshot shows the port it bound',
+    /port/.test(snapshot.stdout) && snapshot.stdout.includes(String(find('observed').port)), snapshot.stdout.split('\n').slice(0, 2).join(' | '));
   startedPids.add(find('observed').pid);
   cli(['delete', 'observed']);
 

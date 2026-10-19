@@ -17,7 +17,7 @@ Comandos:
 | Comando | O que faz |
 |---|---|
 | `start <arquivo\|config>` | sobe um script ou todos os apps de um ecosystem file |
-| `list` (`ls`) | lista os processos (`--json`, `--namespace`) |
+| `list` (`ls`) | lista os processos, com a porta que cada um abriu (`--json`, `--namespace`) |
 | `describe <nome\|id>` | todos os detalhes de um processo (JSON) |
 | `stop` / `restart` / `reload <nome\|id\|all>` | parada graciosa, reinício, reload sem downtime |
 | `delete <nome\|id\|all>` | para e esquece |
@@ -35,7 +35,8 @@ Recursos: fork mode e **cluster mode** com balanceamento round-robin e **reload 
 janela de indisponibilidade**, restart automático com orçamento de instabilidade,
 `--watch`, `--cron`, `--max-memory-restart`, `--wait-ready`, namespaces, ecosystem
 files, logs por app **com rotação por tamanho e gzip opcional**, streaming de logs,
-save/resurrect idempotente, boot via systemd/launchd, um dashboard local e uma TUI
+save/resurrect idempotente, boot via systemd/launchd, **descoberta automática da porta
+que cada app abre** (sem o app precisar avisar), um dashboard local e uma TUI
 (`monit`).
 
 ## Instalando
@@ -142,10 +143,11 @@ Um app pode declarar que está pronto mandando uma mensagem por IPC:
 if (process.send) process.send('ready');
 ```
 
-Com `--wait-ready`, o `start` só retorna depois disso (no cluster, também vale o evento
-`listening`), e o `reload` usa a mesma espera antes de aposentar o worker antigo. O
-limite é o `--listen-timeout`: um app que nunca sinaliza não trava o comando, apenas
-gasta o timeout.
+Com `--wait-ready`, o `start` só retorna depois disso, e o `reload` usa a mesma espera
+antes de aposentar o worker antigo. Não é preciso o app enviar nada: qualquer app que
+abra uma porta TCP conta como pronto assim que o socket está de fato escutando (é a
+mesma informação usada para descobrir a porta). O limite é o `--listen-timeout`: um app
+que nunca sinaliza não trava o comando, apenas gasta o timeout.
 
 ### Logs
 
@@ -163,6 +165,34 @@ crescem sem limite.
 Em ecosystem files, as mesmas opções aparecem como `log_date_format`, `merge_logs`,
 `log_rotate_size`, `log_rotate_keep`, `log_rotate_compress` e `wait_ready` (snake_case
 ou camelCase, como todas as outras).
+
+### Portas
+
+O `procman` descobre sozinho a porta que o app abre — o app não precisa avisar nada.
+Todo servidor TCP do Node (`http`, `https`, `net`, e portanto Express, Fastify, Koa e o
+dev server do Vite) passa por `net.Server#listen`, e o wrapper do container intercepta
+esse ponto, lê `server.address()` e reporta a porta ao supervisor por IPC. Isso cobre
+inclusive o caso em que o app pede `port 0` e o sistema escolhe uma porta livre.
+
+A porta aparece no `list` (coluna `port`), no `describe` (`port` e `ports`) e no
+dashboard, onde cada porta é um link. Um app que abre mais de uma porta mostra todas
+(`41700,41701`); em cluster, as N instâncias que compartilham o mesmo listener contam
+como **uma** porta, não N. Quando o processo morre a porta é esquecida junto: um app
+parado não anuncia uma porta que não está mais escutando.
+
+### Dashboard
+
+`procman web` sobe um dashboard em `127.0.0.1:9615` (só loopback, sem autenticação):
+tabela ordenável por qualquer coluna, filtro por nome/namespace/script, seleção por
+namespace, barra de memória quando há `--max-memory-restart`, pausa do refresh
+automático (que também para sozinho com a aba em segundo plano) e as ações `restart`,
+`stop`, `reload`, `scale`, `info` e `delete` na própria linha. Cada processo tem os logs
+ao vivo (com seguir/ir-ao-fim e linhas de erro destacadas) e um painel de detalhes
+(`cwd`, `args`, portas, arquivos de log).
+
+A página é servida com `Cache-Control: no-store` e uma CSP restritiva com **nonce**
+(nada de `unsafe-inline` para script): mesmo sendo um serviço local sem autenticação,
+ela não executa script injetado.
 
 ### Quem pode subir o daemon
 
@@ -302,8 +332,11 @@ explícito sem contar como instável, `stop` sem restart, `delete`, passthrough 
 ECONNREFUSED**, `scale` para cima e para baixo, `--watch` (uma edição → um restart),
 `--max-memory-restart` (dispara e é throttled), parser de cron (incluindo rejeitar
 expressões inválidas), `save`/`kill`/`resurrect` idempotente, ecosystem file com
-`exec_mode: cluster` e namespace, geração da unidade de boot, dashboard (HTML, API,
-ação de restart, stop), `logs --follow` entregando linhas ao vivo, **rotação de logs
+`exec_mode: cluster` e namespace, geração da unidade de boot, dashboard (HTML, API com
+porta, ação de restart, stop, CSP com nonce), **descoberta da porta** (inclusive `port
+0` e cluster com listener compartilhado reportando uma única porta, mais o ciclo
+stop/restart que a esquece e a redescobre), `logs --follow` entregando linhas ao vivo,
+**rotação de logs
 sem perder nenhuma das 600 linhas** (com compressão gzip e o limite de gerações),
 `--log-date-format`, `--wait-ready` (espera de verdade, e o caso em que o app nunca
 sinaliza), logs por instância com `--no-merge-logs`, o retrato do `monit` quando a
@@ -342,6 +375,9 @@ node scripts/hammer.js http://127.0.0.1:3000/health 8000
   debounce configurável por app (fixo em 300 ms).
 - **Tree kill**: a varredura de `/proc` é Linux. Em outros sistemas a parada de um
   worker em cluster cai para "matar só o pid".
+- **Descoberta de porta**: cobre servidores TCP abertos no próprio processo Node. Um app
+  que delega o `listen` a outro processo, a um addon nativo ou que roda em outro runtime
+  (Python, Go) não reporta porta nenhuma — nesses casos o `list` mostra `-`.
 - **`reload` espera `listening`/`ready`**: um app em cluster que nunca chama `listen()`
   nem manda `ready` faz o reload gastar `--listen-timeout` (padrão 4 s) por worker antes
   de aposentar o antigo. Use `restart` nesse caso, ou reduza o timeout.
@@ -354,7 +390,8 @@ node scripts/hammer.js http://127.0.0.1:3000/health 8000
   dividido entre as instâncias; a intercalação entre arquivos diferentes é por slot, não
   cronológica (não há timestamp global para ordenar).
 - **Dashboard sem autenticação**: escuta em `127.0.0.1` por padrão. Usar `--host`
-  diferente disso emite um aviso, e é responsabilidade de quem chamou.
+  diferente disso emite um aviso, e é responsabilidade de quem chamou. A página vai com
+  CSP de nonce e sem cache, mas a API em si não tem autenticação nenhuma.
 - **Recursos do PM2 não implementados**: `startup` no Windows, `deploy`, módulos,
   `--watch` com globs, `log_date_format` com o formato `strftime` completo (aqui são
   tokens: `YYYY MM DD HH mm ss SSS ISO`), e o protocolo, que aqui é um JSON por linha
