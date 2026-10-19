@@ -22,7 +22,7 @@ Comandos:
 | `stop` / `restart` / `reload <nome\|id\|all>` | parada graciosa, reinício, reload sem downtime |
 | `delete <nome\|id\|all>` | para e esquece |
 | `scale <nome\|id> <n>` | cresce/encolhe um app em cluster (`0` = um por CPU) |
-| `logs <nome\|id>` | imprime e segue os logs (`--lines`, `--follow`, `--out`, `--err`) |
+| `logs [nome\|id]` (`log`) | imprime e segue os logs; sem nome, mostra **todos os apps** de uma vez, um com cada cor (`--lines`, `--follow`, `--out`, `--err`) |
 | `monit` | visão ao vivo no terminal (`--interval`, `--sort`) |
 | `save` / `resurrect` | persiste a lista / replay dela (usado no boot) |
 | `ping` | confirma que o daemon responde |
@@ -30,7 +30,8 @@ Comandos:
 | `web` | dashboard HTTP embutido, só em loopback (`--port`, `--stop`, `--auth`/`--no-auth`) |
 | `user` | contas do dashboard: `list`/`add`/`passwd`/`rm` (SQLite em `~/.procman/users.db`) |
 | `startup` | gera (ou instala com `--install`) a unidade de boot systemd/launchd |
-| `version` / `help` | versão e ajuda |
+| `completion <bash\|zsh>` | imprime o script de autocomplete do TAB (`--install` põe no rc do shell) |
+| `version` / `help [comando]` | versão e manual: `procman help logs`, `procman logs --help` |
 
 Recursos: fork mode e **cluster mode** com balanceamento round-robin e **reload sem
 janela de indisponibilidade**, restart automático com orçamento de instabilidade,
@@ -60,7 +61,9 @@ Do clone, sem instalar nada — troque `procman` por `node bin/procman.js`:
 node bin/procman.js start ./examples/app.js --name web -- --label alpha
 node bin/procman.js list
 node bin/procman.js status         # a mesma tabela, com um resumo embaixo
+node bin/procman.js logs           # todos os apps, cada um com a sua cor
 node bin/procman.js logs web --follow
+node bin/procman.js help start     # o manual do comando (ou: start --help)
 node bin/procman.js restart web
 node bin/procman.js delete web
 node bin/procman.js kill            # para tudo e encerra o daemon
@@ -75,6 +78,19 @@ Comandos que recebem um alvo (`describe`, `stop`, `restart`, `reload`, `delete`,
 (`staging:web`) ou o **caminho do script** (`./examples/app.js`). Caminhos relativos
 são resolvidos pelo cliente, contra o diretório de quem chamou — o daemon roda com
 `cwd` no diretório de estado.
+
+Chamar um comando sem o que ele precisa não devolve só um erro seco: o manual daquele
+comando vai junto no stderr (e um `start` sem argumentos aponta o ecosystem file mais
+próximo). `procman help <comando>` e `procman <comando> --help` imprimem o mesmo texto;
+`--help` nunca executa o comando.
+
+Autocomplete no TAB (bash e zsh) — completa comandos, flags, nomes de app (inclusive
+`namespace:nome`), arquivos de ecosystem e usuários do dashboard:
+
+```bash
+eval "$(procman completion bash)"     # nesta sessão
+procman completion bash --install     # ou fixa no ~/.bashrc (bloco marcado, idempotente)
+```
 
 Cluster com 4 instâncias na mesma porta (round-robin do `node:cluster`):
 
@@ -165,6 +181,15 @@ Um arquivo por app (`logs/<id>-<nome>-{out,err}.log`), compartilhado por todas a
 instâncias. Com `--no-merge-logs` cada instância ganha o seu (`...-out-0.log`), e aí é
 possível separar a saída de N workers; nesse caso o `logs` marca cada linha com o slot
 (`web | [1] ...`). O app recebe `NODE_APP_INSTANCE` e `PROC_INSTANCE` com o índice.
+
+`procman logs` (ou `log`) **sem alvo** mostra todos os apps de uma vez, no estilo
+`pm2 logs`: cada linha vem prefixada com o app de origem e cada app tem a sua cor, o
+que mantém um stack cheio legível. As cores só aparecem quando a saída é um terminal
+(piping/redirecionamento devolve o texto cru, e `FORCE_COLOR=1`/`NO_COLOR=1` forçam a
+decisão). Em cluster com `merge_logs` (o padrão) os workers compartilham o arquivo, e
+por isso uma linha já gravada não pode ser atribuída a um worker — mas as linhas ao
+vivo podem, e cada worker ganha a sua cor; com `--no-merge-logs` o slot `[n]` aparece
+no histórico e no ao vivo. `--lines 0` significa "sem histórico" (só o ao vivo).
 
 Rotação é opcional e por app: com `--log-rotate-size 10M --log-rotate-keep 5
 --log-rotate-compress`, o arquivo é fechado, renomeado para `<arquivo>.<timestamp>`
@@ -316,8 +341,16 @@ bin/procman.js
                        ├─ lib/startup.js         systemd/launchd
                        ├─ lib/users.js           usuários/sessões (SQLite do próprio Node)
                        └─ lib/dashboard.js       dashboard HTTP (loopback) + login
+   ├─ lib/help.js                HELP global + um manual por comando (uma fonte só)
+   ├─ lib/completion.js          scripts de TAB (bash/zsh) e --install no rc
    └─ lib/monit.js               TUI ao vivo (só leitura), fala com o daemon pelo client
 ```
+
+O completion não carrega nenhuma lista de comandos no shell: o script gerado pergunta
+ao próprio CLI (`procman __complete commands|options|targets|namespaces|users|
+ecosystems`), então uma versão nova nunca deixa um cache velho no `~/.bashrc`. É por
+isso que o `help` e os manuais moram num módulo separado: a lista de comandos que o
+TAB oferece e a que o `help` documenta são literalmente a mesma.
 
 Decisões que valem explicação:
 
@@ -376,7 +409,7 @@ O teste assevera os `ECONNREFUSED` (devem ser 0) e apenas informa os resets.
 ## Testes
 
 ```bash
-npm run smoke     # 166 asserções end-to-end com PROCMAN_HOME descartável
+npm run smoke     # 220 asserções end-to-end com PROCMAN_HOME descartável
 ```
 
 O smoke cobre: subida/reuso do daemon, socket/pidfile, fork mode, logs em arquivo,
@@ -402,8 +435,15 @@ stop/restart que a esquece e a redescobre), `logs --follow` entregando linhas ao
 sem perder nenhuma das 600 linhas** (com compressão gzip e o limite de gerações),
 `--log-date-format`, `--wait-ready` (espera de verdade, e o caso em que o app nunca
 sinaliza), logs por instância com `--no-merge-logs`, o retrato do `monit` quando a
-saída não é um terminal, erros de CLI sem substituir o daemon, e a checagem final de
-que **nada sobra**: nem processos, nem socket, nem pidfile.
+saída não é um terminal, **`logs` sem alvo** (todas as linhas etiquetadas por app,
+cor por app só quando pedida ou em terminal, `--lines 0`, app que nunca escreveu,
+`--json` e o `[slot]` por worker no follow de um cluster), **manual por comando**
+(`help <cmd>`, `<cmd> --help` sem executar o comando, erro de uso imprimindo o manual,
+dica do ecosystem file mais próximo), **autocomplete** (asserções sobre os candidatos e
+um bash de verdade rodando o script gerado para completar comando, alvo, flag e
+subcomando, além do `--install` idempotente num `HOME` descartável), erros de CLI sem
+substituir o daemon, e a checagem final de que **nada sobra**: nem processos, nem
+socket, nem pidfile.
 
 Prova manual da guarda de endpoint (um segundo daemon no mesmo socket não deve assumir
 o controle):

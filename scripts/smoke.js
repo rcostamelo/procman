@@ -44,7 +44,7 @@ function section(title) { console.log(`\n# ${title}`); }
  */
 function cli(args, opts = {}) {
   const result = spawnSync(process.execPath, [CLI, ...args], {
-    env,
+    env: opts.env ? Object.assign({}, env, opts.env) : env,
     encoding: 'utf8',
     cwd: opts.cwd || ROOT
   });
@@ -712,6 +712,164 @@ function hammer(url, durationMs, concurrency = 4) {
     /port/.test(snapshot.stdout) && snapshot.stdout.includes(String(find('observed').port)), snapshot.stdout.split('\n').slice(0, 2).join(' | '));
   startedPids.add(find('observed').pid);
   cli(['delete', 'observed']);
+
+  // =========================================================== help / completion =
+  section('help and completion');
+  const usage = cli([]);
+  check('a bare command prints the usage summary and fails', usage.status !== 0 && /^Usage: procman <command>/.test(usage.stdout));
+  check('"help" prints the same summary and succeeds', cli(['help']).status === 0 && cli(['help']).stdout === usage.stdout);
+
+  const startManual = cli(['help', 'start']);
+  check('"help start" prints the start manual', startManual.status === 0 && startManual.stdout.startsWith('Usage: procman start'));
+  check('"start --help" is the same text', cli(['start', '--help']).stdout === startManual.stdout);
+  check('the manual documents the passthrough separator', /-- <app args>/.test(startManual.stdout) && /Options:/.test(startManual.stdout));
+  check('aliases resolve to their base manual', cli(['help', 'ls']).stdout.startsWith('Usage: procman list'));
+  check('an unknown command in "help" fails and lists what exists', cli(['help', 'frobnicate']).status !== 0 && /unknown command/.test(cli(['help', 'frobnicate']).stderr));
+
+  // --help must win over the command itself.
+  const pingPid = (cli(['ping']).stdout.match(/pid (\d+)/) || [])[1];
+  check('"--help" does not run the command',
+    /Usage: procman kill/.test(cli(['kill', '--help']).stdout) && cli(['ping']).stdout.includes(`pid ${pingPid}`), String(pingPid));
+
+  const noStart = cli(['start']);
+  check('a missing argument fails', noStart.status !== 0);
+  check('...and prints the manual instead of a dry one-liner', /start requires a script or an ecosystem file/.test(noStart.stderr) && /Usage: procman start/.test(noStart.stderr));
+  check('...for describe too', /describe requires a name or id/.test(cli(['describe']).stderr) && /Usage: procman describe/.test(cli(['describe']).stderr));
+  check('...for scale too', /scale requires a target/.test(cli(['scale']).stderr) && /Usage: procman scale/.test(cli(['scale']).stderr));
+  check('...and for a bad subcommand', /unknown subcommand/.test(cli(['user', 'frobnicate']).stderr) && /Usage: procman user/.test(cli(['user', 'frobnicate']).stderr));
+
+  const hintDir = fs.mkdtempSync(path.join(os.tmpdir(), 'procman-eco-'));
+  fs.writeFileSync(path.join(hintDir, 'ecosystem.procman.config.js'), 'module.exports = { apps: [] };\n');
+  fs.mkdirSync(path.join(hintDir, 'frontend'));
+  const hinted = cli(['start'], { cwd: path.join(hintDir, 'frontend') });
+  check('a bare "start" points at the ecosystem file next to you',
+    /found one here: \.\.\/ecosystem\.procman\.config\.js/.test(hinted.stderr) &&
+    /try: procman start \.\.\/ecosystem\.procman\.config\.js/.test(hinted.stderr));
+  check('the completion offers that same file', cli(['__complete', 'ecosystems'], { cwd: path.join(hintDir, 'frontend') }).stdout.includes('../ecosystem.procman.config.js'));
+  fs.rmSync(hintDir, { recursive: true, force: true });
+
+  check('the bash script defines the completion function', /complete -o default -F _procman_complete procman/.test(cli(['completion', 'bash']).stdout));
+  check('the zsh script is a compdef', /#compdef procman/.test(cli(['completion', 'zsh']).stdout) && /compdef _procman_complete procman/.test(cli(['completion', 'zsh']).stdout));
+  const badShell = cli(['completion', 'fish']);
+  check('an unsupported shell fails with the manual', badShell.status !== 0 && /unsupported shell/.test(badShell.stderr) && /Usage: procman completion/.test(badShell.stderr));
+
+  // Install into a throwaway HOME: never touch the real rc file.
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'procman-home-'));
+  const rcFile = path.join(fakeHome, '.bashrc');
+  const installed = cli(['completion', 'bash', '--install'], { env: { HOME: fakeHome, SHELL: '/bin/bash' } });
+  check('--install reports what it did', installed.status === 0 && /installed for bash in/.test(installed.stdout));
+  const rcText = fs.readFileSync(rcFile, 'utf8');
+  check('--install appends a marked block', rcText.includes('# >>> procman completion >>>') && rcText.includes('eval "$(procman completion bash)"') && rcText.includes('# <<< procman completion <<<'));
+  const againInstall = cli(['completion', 'bash', '--install'], { env: { HOME: fakeHome, SHELL: '/bin/bash' } });
+  check('--install twice is a no-op', /already installed/.test(againInstall.stdout) && rcText === fs.readFileSync(rcFile, 'utf8'));
+  fs.rmSync(fakeHome, { recursive: true, force: true });
+
+  check('__complete commands lists the commands', /\bstart\b/.test(cli(['__complete', 'commands']).stdout) && /\bcompletion\b/.test(cli(['__complete', 'commands']).stdout));
+  const optWords = cli(['__complete', 'options']).stdout;
+  check('__complete options lists the flags, negations included', optWords.includes('--json') && optWords.includes('--namespace') && optWords.includes('--no-autorestart'));
+  check('__complete never fails the shell', cli(['__complete']).status === 0 && cli(['__complete', 'nonsense']).stdout.trim() === '');
+
+  cli(['start', path.join(ROOT, 'examples', 'app.js'), '--name', 'compdemo', '--namespace', 'demo']);
+  startedPids.add(find('compdemo').pid);
+  const targets = cli(['__complete', 'targets']).stdout;
+  check('__complete targets offers name, id, namespace:name and all',
+    targets.includes('compdemo') && targets.includes('demo:compdemo') && targets.includes('all'));
+  check('__complete namespaces offers the live namespaces', cli(['__complete', 'namespaces']).stdout.includes('demo'));
+  cli(['user', 'add', 'completionuser', '--password', 'completion-password-1']);
+  check('__complete users offers the dashboard accounts', cli(['__complete', 'users']).stdout.includes('completionuser'));
+  cli(['user', 'rm', 'completionuser']);
+
+  // End to end: a real bash, the generated script, and the shim on PATH.
+  const shim = path.join(HOME, 'procman');
+  fs.writeFileSync(shim, `#!/bin/sh\nexec ${process.execPath} ${CLI} "$@"\n`, { mode: 0o755 });
+  const compFile = path.join(HOME, 'completion.bash');
+  fs.writeFileSync(compFile, cli(['completion', 'bash']).stdout);
+  const probe = path.join(HOME, 'probe.sh');
+  fs.writeFileSync(probe, [
+    `eval "$(cat '${compFile}')"`,
+    'try() { COMP_WORDS=("$@"); COMP_CWORD=$(( $# - 1 )); COMPREPLY=(); _procman_complete; echo "${COMPREPLY[*]}"; }',
+    'echo "commands:$(try procman st)"',
+    'echo "targets:$(try procman stop comp)"',
+    'echo "options:$(try procman logs --)"',
+    'echo "subcmds:$(try procman user "")"',
+    'echo "shells:$(try procman completion "")"'
+  ].join('\n') + '\n');
+  const bash = spawnSync('bash', [probe], { encoding: 'utf8', env: Object.assign({}, env, { PATH: `${HOME}:${process.env.PATH}` }) });
+  const bashOut = bash.stdout || '';
+  check('a real bash completes "procman st"', /^commands:.*\bstart\b.*\bstatus\b/m.test(bashOut));
+  check('...completes a live app name', /^targets:.*\bcompdemo\b/m.test(bashOut));
+  check('...completes options after "--"', /^options:.*--json/m.test(bashOut));
+  check('...completes user subcommands', /^subcmds:.*list.*add.*passwd.*rm/m.test(bashOut));
+  check('...completes the shell names', /^shells:bash zsh$/m.test(bashOut));
+  check('completion says nothing when stdout is not a tty', !cli(['list']).stdout.includes('\u001b[2m'));
+
+  section('logs (one app, many apps, colours)');
+  cli(['start', path.join(ROOT, 'examples', 'chatty.js'), '--name', 'talker', '--', '--count', '3']);
+  cli(['start', path.join(ROOT, 'examples', 'app.js'), '--name', 'other', '--', '--label', 'otro']);
+  await waitFor('both loggers are online', () => {
+    const a = find('talker');
+    const b = find('other');
+    return a && b && a.status === 'online' && b.status === 'online';
+  });
+  await waitFor('the logger app has written something', () => find('other').out_log &&
+    fs.existsSync(find('other').out_log) && fs.readFileSync(find('other').out_log, 'utf8').includes('alive'));
+  startedPids.add(find('talker').pid);
+  startedPids.add(find('other').pid);
+
+  const oneApp = cli(['logs', 'other', '--lines', '5']);
+  check('logs <name> still prints just that app', /other \| /.test(oneApp.stdout) && !oneApp.stdout.includes('talker | '), oneApp.stdout);
+
+  const everyApp = cli(['logs', '--lines', '5']);
+  check('logs with no name tails every app', /^other \| /m.test(everyApp.stdout) && /^talker \| /m.test(everyApp.stdout), everyApp.stdout);
+  check('...and each line says which app it came from', everyApp.stdout.trim().split('\n').every((line) => /^\S+ \| /.test(line)), everyApp.stdout);
+
+  const aliasLog = cli(['log', 'other', '--lines', '5']);
+  check('"log" is a synonym for "logs"',
+    /^other \| /m.test(aliasLog.stdout) && !aliasLog.stdout.includes('talker | '), aliasLog.stdout);
+  check('"log" is offered by the completion', cli(['__complete', 'commands']).stdout.split('\n').includes('log'));
+  check('..."help log" resolves to the logs manual', cli(['help', 'log']).stdout.startsWith('Usage: procman logs'));
+
+  // Colours: only on a terminal (or when asked for), never by accident in a pipe.
+  check('piped output carries no escape codes', !/\u001b\[/.test(everyApp.stdout), JSON.stringify(everyApp.stdout.slice(0, 40)));
+  const forced = cli(['logs', '--lines', '5'], { env: { FORCE_COLOR: '1' } });
+  check('FORCE_COLOR colours each app', /\u001b\[\d+mother \| \u001b\[0m/.test(forced.stdout) && /\u001b\[\d+mtalker \| \u001b\[0m/.test(forced.stdout), JSON.stringify(forced.stdout.slice(0, 60)));
+  const nameColour = (text, name) => (text.match(new RegExp(`\\u001b\\[(\\d+)m${name} \\| `)) || [])[1];
+  check('...with a different colour per app', nameColour(forced.stdout, 'other') !== nameColour(forced.stdout, 'talker'));
+  check('NO_COLOR wins over FORCE_COLOR', !/\u001b\[/.test(cli(['logs', '--lines', '3'], { env: { FORCE_COLOR: '1', NO_COLOR: '1' } }).stdout));
+  check('--lines 0 shows no history at all', cli(['logs', '--lines', '0']).stdout.trim() === '');
+  cli(['start', path.join(ROOT, 'examples', 'chatty.js'), '--name', 'quiet', '--', '--count', '0']);
+  await waitFor('the quiet app is online', () => { const r = find('quiet'); return r && r.status === 'online'; });
+  startedPids.add(find('quiet').pid);
+  const silent = cli(['logs', 'quiet', '--lines', '5']);
+  check('an app that never logged says so, on stderr', silent.stdout.trim() === '' && /has not written anything yet/.test(silent.stderr), `${silent.stdout}${silent.stderr}`);
+  check('a silent app keeps stdout empty (so pipes stay clean)', silent.stdout === '');
+  check('--json returns one tagged line per app', (() => {
+    const rows = JSON.parse(cli(['logs', '--lines', '2', '--json']).stdout);
+    return rows.all === true && rows.name === null && rows.lines.length > 0 &&
+      rows.lines.every((e) => typeof e.name === 'string' && typeof e.line === 'string');
+  })());
+
+  // Cluster: the merged file stays unpolluted, but live lines know their worker.
+  cli(['start', path.join(ROOT, 'examples', 'app.js'), '--name', 'clog', '-i', '2', '--', '--label', 'cl']);
+  await waitFor('the logging cluster is online', () => {
+    const r = find('clog');
+    return r && r.instances === 2 && r.pids.every((pid) => alive(pid));
+  });
+  find('clog').pids.forEach((pid) => startedPids.add(pid));
+  await waitFor('both workers bind the same port', () => (find('clog').ports || []).length === 1, 15000);
+  const followed = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [CLI, 'logs', 'clog', '--lines', '0', '--follow'], { env });
+    let out = '';
+    child.stdout.on('data', (chunk) => { out += chunk; });
+    setTimeout(() => { child.kill('SIGINT'); resolve(out); }, 2500);
+  });
+  check('--follow tags each worker with its slot', /clog \| \[0\] /.test(followed) && /clog \| \[1\] /.test(followed), followed.slice(0, 200));
+  const mergedFile = find('clog').out_log;
+  check('the merged log file itself stays clean', !/^\[\d\] /m.test(fs.readFileSync(mergedFile, 'utf8')));
+  cli(['delete', 'clog']);
+  cli(['delete', 'talker']);
+  cli(['delete', 'other']);
+  cli(['delete', 'quiet']);
 
   // =========================================================== error handling =
   section('error handling');
