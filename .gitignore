@@ -1,0 +1,12 @@
+# Sem dependências de runtime: só artefatos de empacotamento e estado local.
+node_modules/
+*.tgz
+
+# Se alguém apontar PROCMAN_HOME para dentro do repo durante testes.
+.procman/
+
+# Editores / sistema
+.DS_Store
+*.swp
+.idea/
+.vscode/

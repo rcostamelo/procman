@@ -1,0 +1,42 @@
+{
+  "name": "procmand",
+  "version": "0.2.0",
+  "description": "Minimal process manager: long-lived daemon + short-lived CLI talking over a unix socket. Zero runtime dependencies.",
+  "license": "MIT",
+  "author": "Raony Melo <rcostamelo@gmail.com>",
+  "keywords": [
+    "process-manager",
+    "process-supervisor",
+    "supervisor",
+    "daemon",
+    "cluster",
+    "monitoring",
+    "log-rotation",
+    "zero-dependencies",
+    "cli"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rcostamelo/procman.git"
+  },
+  "homepage": "https://github.com/rcostamelo/procman#readme",
+  "bugs": {
+    "url": "https://github.com/rcostamelo/procman/issues"
+  },
+  "bin": {
+    "procman": "bin/procman.js"
+  },
+  "main": "index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "smoke": "node scripts/smoke.js",
+    "prepublishOnly": "npm run smoke"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "index.js"
+  ]
+}
