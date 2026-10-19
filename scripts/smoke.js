@@ -849,6 +849,31 @@ function hammer(url, durationMs, concurrency = 4) {
       rows.lines.every((e) => typeof e.name === 'string' && typeof e.line === 'string');
   })());
 
+  // Follow is the default on a terminal (pm2 feel), but never in a pipe: that is
+  // what keeps `procman logs > file` and scripts from hanging forever.
+  const hasPty = spawnSync('script', ['--version'], { encoding: 'utf8' }).status === 0;
+  if (hasPty) {
+    const ptyRun = spawn('script', ['-qec', `"${process.execPath}" "${CLI}" logs other --lines 1`, '/dev/null'], { env });
+    let ptyOut = '';
+    ptyRun.stdout.on('data', (chunk) => { ptyOut += chunk; });
+    await sleep(2000);
+    const stillRunning = ptyRun.exitCode === null;
+    ptyRun.kill('SIGTERM');
+    let stopped = false;
+    for (let i = 0; i < 60 && !stopped; i++) {
+      await sleep(100);
+      stopped = ptyRun.exitCode !== null || ptyRun.signalCode !== null;
+    }
+    if (!stopped) ptyRun.kill('SIGKILL');
+    check('on a terminal, logs prints the tail and keeps streaming', stillRunning && /other \| /.test(ptyOut), `alive=${stillRunning} out=${ptyOut.slice(0, 80)}`);
+    check('...and stops when killed (Ctrl-C)', stopped, `exit=${ptyRun.exitCode} signal=${ptyRun.signalCode}`);
+
+    const ptyNoFollow = spawnSync('script', ['-qec', `"${process.execPath}" "${CLI}" logs other --lines 1 --no-follow`, '/dev/null'],
+      { env, encoding: 'utf8', timeout: 10000 });
+    check('--no-follow returns by itself, even on a terminal', ptyNoFollow.status === 0 && /other \| /.test(ptyNoFollow.stdout), `${ptyNoFollow.status}`);
+  }
+  check('--no-follow is offered by the completion', cli(['__complete', 'options']).stdout.split('\n').includes('--no-follow'));
+
   // Cluster: the merged file stays unpolluted, but live lines know their worker.
   cli(['start', path.join(ROOT, 'examples', 'app.js'), '--name', 'clog', '-i', '2', '--', '--label', 'cl']);
   await waitFor('the logging cluster is online', () => {

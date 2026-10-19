@@ -22,7 +22,7 @@ Comandos:
 | `stop` / `restart` / `reload <nome\|id\|all>` | parada graciosa, reinício, reload sem downtime |
 | `delete <nome\|id\|all>` | para e esquece |
 | `scale <nome\|id> <n>` | cresce/encolhe um app em cluster (`0` = um por CPU) |
-| `logs [nome\|id]` (`log`) | imprime e segue os logs; sem nome, mostra **todos os apps** de uma vez, um com cada cor (`--lines`, `--follow`, `--out`, `--err`) |
+| `logs [nome\|id]` (`log`) | imprime e **segue até Ctrl-C** (como `pm2 logs`); sem nome, mostra **todos os apps** de uma vez, um com cada cor (`--lines`, `--no-follow`, `--out`, `--err`) |
 | `monit` | visão ao vivo no terminal (`--interval`, `--sort`) |
 | `save` / `resurrect` | persiste a lista / replay dela (usado no boot) |
 | `ping` | confirma que o daemon responde |
@@ -61,8 +61,8 @@ Do clone, sem instalar nada — troque `procman` por `node bin/procman.js`:
 node bin/procman.js start ./examples/app.js --name web -- --label alpha
 node bin/procman.js list
 node bin/procman.js status         # a mesma tabela, com um resumo embaixo
-node bin/procman.js logs           # todos os apps, cada um com a sua cor
-node bin/procman.js logs web --follow
+node bin/procman.js logs           # todos os apps, cada um com a sua cor, seguindo até Ctrl-C
+node bin/procman.js logs web --no-follow   # só o histórico e sai
 node bin/procman.js help start     # o manual do comando (ou: start --help)
 node bin/procman.js restart web
 node bin/procman.js delete web
@@ -184,8 +184,11 @@ possível separar a saída de N workers; nesse caso o `logs` marca cada linha co
 
 `procman logs` (ou `log`) **sem alvo** mostra todos os apps de uma vez, no estilo
 `pm2 logs`: cada linha vem prefixada com o app de origem e cada app tem a sua cor, o
-que mantém um stack cheio legível. As cores só aparecem quando a saída é um terminal
-(piping/redirecionamento devolve o texto cru, e `FORCE_COLOR=1`/`NO_COLOR=1` forçam a
+que mantém um stack cheio legível. Em um terminal ele **continua transmitindo até
+Ctrl-C** (é o padrão, como no pm2); com a saída em pipe ou arquivo ele imprime o
+retrato e sai, então `procman logs > arquivo` e scripts nunca ficam pendurados —
+`--follow` força o streaming mesmo ali e `--no-follow` força o retrato. As cores só
+aparecem quando a saída é um terminal (e `FORCE_COLOR=1`/`NO_COLOR=1` forçam a
 decisão). Em cluster com `merge_logs` (o padrão) os workers compartilham o arquivo, e
 por isso uma linha já gravada não pode ser atribuída a um worker — mas as linhas ao
 vivo podem, e cada worker ganha a sua cor; com `--no-merge-logs` o slot `[n]` aparece
@@ -409,7 +412,7 @@ O teste assevera os `ECONNREFUSED` (devem ser 0) e apenas informa os resets.
 ## Testes
 
 ```bash
-npm run smoke     # 220 asserções end-to-end com PROCMAN_HOME descartável
+npm run smoke     # 224 asserções end-to-end com PROCMAN_HOME descartável
 ```
 
 O smoke cobre: subida/reuso do daemon, socket/pidfile, fork mode, logs em arquivo,
@@ -437,7 +440,9 @@ sem perder nenhuma das 600 linhas** (com compressão gzip e o limite de geraçõ
 sinaliza), logs por instância com `--no-merge-logs`, o retrato do `monit` quando a
 saída não é um terminal, **`logs` sem alvo** (todas as linhas etiquetadas por app,
 cor por app só quando pedida ou em terminal, `--lines 0`, app que nunca escreveu,
-`--json` e o `[slot]` por worker no follow de um cluster), **manual por comando**
+`--json` e o `[slot]` por worker no follow de um cluster, e o follow padrão no
+terminal provado com um **pty de verdade** via `script`, além do `--no-follow` saindo
+sozinho), **manual por comando**
 (`help <cmd>`, `<cmd> --help` sem executar o comando, erro de uso imprimindo o manual,
 dica do ecosystem file mais próximo), **autocomplete** (asserções sobre os candidatos e
 um bash de verdade rodando o script gerado para completar comando, alvo, flag e
