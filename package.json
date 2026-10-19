@@ -1,6 +1,6 @@
 {
   "name": "procmand",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Minimal process manager: long-lived daemon + short-lived CLI talking over a unix socket. Zero runtime dependencies.",
   "license": "MIT",
   "author": "Raony Melo <rcostamelo@gmail.com>",

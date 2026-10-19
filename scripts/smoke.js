@@ -82,27 +82,35 @@ function freePort() {
   });
 }
 
-function get(url) {
+function get(url, opts = {}) {
   return new Promise((resolve, reject) => {
-    const request = http.get(url, (res) => {
+    // agent:false — no keep-alive pool: a dashboard restarted on the same port
+    // would otherwise hand us a socket the previous server already closed.
+    const request = http.get(url, { agent: false, headers: opts.headers || {} }, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
+    });
+    request.on('error', (err) => { err.url = url; reject(err); });
+    request.setTimeout(2000, () => request.destroy(new Error(`timeout on ${url}`)));
+  });
+}
+
+function post(url, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const payload = opts.body || '';
+    const headers = Object.assign({}, opts.headers || {});
+    if (payload) {
+      headers['content-type'] = 'application/x-www-form-urlencoded';
+      headers['content-length'] = Buffer.byteLength(payload);
+    }
+    const request = http.request(url, { method: 'POST', headers, agent: false }, (res) => {
       let body = '';
       res.on('data', (c) => { body += c; });
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body }));
     });
     request.on('error', reject);
-    request.setTimeout(2000, () => request.destroy(new Error('timeout')));
-  });
-}
-
-function post(url) {
-  return new Promise((resolve, reject) => {
-    const request = http.request(url, { method: 'POST' }, (res) => {
-      let body = '';
-      res.on('data', (c) => { body += c; });
-      res.on('end', () => resolve({ status: res.statusCode, body }));
-    });
-    request.on('error', reject);
-    request.end();
+    request.end(payload);
   });
 }
 
@@ -272,6 +280,16 @@ function hammer(url, durationMs, concurrency = 4) {
   const apiTable = cli(['list']).stdout;
   check('the table renders the port in its own column', apiTable.includes('port') && apiTable.includes(String(apiPort)), apiTable.split('\n').slice(0, 3).join(' | '));
 
+  // --instances max is documented as "one per CPU" and used to fall back to a
+  // single worker instead.
+  cli(['start', path.join(ROOT, 'examples', 'http.js'), '--name', 'maxed', '-i', 'max', '--', '--port', String(await freePort())]);
+  const maxed = find('maxed');
+  check('--instances max really means one worker per CPU',
+    maxed.mode === 'cluster' && maxed.instances === os.cpus().length,
+    JSON.stringify({ mode: maxed.mode, instances: maxed.instances, cpus: os.cpus().length }));
+  maxed.pids.forEach((pid) => startedPids.add(pid));
+  cli(['delete', 'maxed']);
+
   const rr = await hammer(`http://127.0.0.1:${apiPort}/health`, 600, 6);
   check('the load balancer spreads connections across all 3 instances', rr.pids.size === 3, `pids=${[...rr.pids].join(',')}`);
 
@@ -366,6 +384,9 @@ function hammer(url, durationMs, concurrency = 4) {
   await waitFor('kill really stops the daemon before returning', () => !alive(daemonPid));
   const resurrected = cli(['resurrect']);
   check('resurrect restarts the saved apps', /resurrected 1 app/.test(resurrected.stdout), resurrected.stdout + resurrected.stderr);
+  check('resurrect reports the record it started, with name/id/pid',
+    /started keep \(id \d+, fork, pid \d+\)/.test(resurrected.stdout), resurrected.stdout);
+  check('resurrect prints no undefined fields', !/undefined/.test(resurrected.stdout), resurrected.stdout);
   await waitFor('the resurrected app is online', () => {
     const current = find('keep');
     return current && current.status === 'online' && current.pid !== 0;
@@ -380,6 +401,7 @@ function hammer(url, durationMs, concurrency = 4) {
   // ================================================================ ecosystem ==
   section('ecosystem file');
   const ecoPort = await freePort();
+  const ecoMaxPort = await freePort();
   const ecoFile = path.join(HOME, 'ecosystem.config.js');
   // `eco-nested` exercises the common `{ cwd: './x', script: 'server.js' }`
   // layout: the script must resolve against the app cwd, not the config file.
@@ -390,10 +412,12 @@ function hammer(url, durationMs, concurrency = 4) {
     { name: 'eco-web', script: ${JSON.stringify(path.join(ROOT, 'examples', 'app.js'))}, args: '--label eco' },
     { name: 'eco-api', script: ${JSON.stringify(path.join(ROOT, 'examples', 'http.js'))},
       exec_mode: 'cluster', instances: 2, args: ['--port', '${ecoPort}'], namespace: 'eco' },
+    { name: 'eco-max', script: ${JSON.stringify(path.join(ROOT, 'examples', 'http.js'))},
+      exec_mode: 'cluster', instances: 'max', args: ['--port', '${ecoMaxPort}'], namespace: 'eco' },
     { name: 'eco-nested', cwd: './nested', script: 'server.js' }
   ] };`);
   const ecoStart = cli(['start', ecoFile]);
-  check('starting an ecosystem file starts every app', /started 3 app/.test(ecoStart.stdout), ecoStart.stdout + ecoStart.stderr);
+  check('starting an ecosystem file starts every app', /started 4 app/.test(ecoStart.stdout), ecoStart.stdout + ecoStart.stderr);
   await waitFor('apps from the ecosystem file are online', () => {
     const a = find('eco-web');
     const b = find('eco-api');
@@ -402,13 +426,17 @@ function hammer(url, durationMs, concurrency = 4) {
   });
   find('eco-web').pids.forEach((pid) => startedPids.add(pid));
   find('eco-api').pids.forEach((pid) => startedPids.add(pid));
+  find('eco-max').pids.forEach((pid) => startedPids.add(pid));
   find('eco-nested').pids.forEach((pid) => startedPids.add(pid));
+  check("an ecosystem instances: 'max' means one worker per CPU",
+    find('eco-max').mode === 'cluster' && find('eco-max').instances === os.cpus().length,
+    JSON.stringify({ instances: find('eco-max').instances, cpus: os.cpus().length }));
   check('a relative script resolves against the app cwd, not the config file',
     find('eco-nested').cwd === ecoNested, JSON.stringify({ cwd: find('eco-nested').cwd, expected: ecoNested }));
   await waitFor('a relative cwd is honoured and its app really serves', () => (find('eco-nested').ports || []).length === 1);
   check('exec_mode cluster is honoured', find('eco-api').mode === 'cluster');
   check('the namespace is applied', find('eco-api').namespace === 'eco');
-  check('list --namespace filters', JSON.parse(cli(['list', '--json', '--namespace', 'eco']).stdout).length === 1);
+  check('list --namespace filters', JSON.parse(cli(['list', '--json', '--namespace', 'eco']).stdout).length === 2);
   check('the ecosystem app actually answers on its port',
     (await get(`http://127.0.0.1:${ecoPort}/health`)).status === 200);
   cli(['delete', 'all']);
@@ -445,12 +473,122 @@ function hammer(url, durationMs, concurrency = 4) {
     dashPage.headers['cache-control'] === 'no-store',
     JSON.stringify({ csp: dashPage.headers['content-security-policy'], cache: dashPage.headers['cache-control'] }));
   const dashPidBefore = find('dash').pid;
-  check('the restart action works', (await post(`http://127.0.0.1:${webPort}/api/action/${find('dash').id}/restart`)).status === 200);
+  check('the restart action works', (await post(`http://127.0.0.1:${webPort}/api/action/${find('dash').id}/restart`,
+    { headers: { 'x-procman': '1' } })).status === 200);
+  check('a write without the same-origin header is refused',
+    (await post(`http://127.0.0.1:${webPort}/api/action/${find('dash').id}/stop`)).status === 403);
   check('the action really restarted the process', find('dash').pid !== dashPidBefore);
   startedPids.add(find('dash').pid);
+  check('the page warns that there are no users yet',
+    (await get(`http://127.0.0.1:${webPort}/`)).body.includes('sem usuários cadastrados'));
   cli(['web', '--stop']);
   check('the dashboard can be stopped', cli(['web', '--stop']).stdout.includes('not running'));
   cli(['delete', 'dash']);
+
+  // ================================================================ status ====
+  section('status');
+  cli(['start', path.join(ROOT, 'examples', 'app.js'), '--name', 'statused']);
+  const statusOut = cli(['status']);
+  check('status prints the same table as list',
+    statusOut.stdout.includes('statused') && statusOut.stdout.includes('uptime'), statusOut.stdout);
+  check('status adds a one-line summary', /app\(s\): \d+ online/.test(statusOut.stdout), statusOut.stdout);
+  check('status --json is still machine readable',
+    JSON.parse(cli(['status', '--json']).stdout).some((p) => p.name === 'statused'));
+  cli(['delete', 'statused']);
+
+  // ========================================================= users (sqlite) ===
+  section('users');
+  const usersFile = path.join(HOME, 'users.db');
+  check('no user database until a user exists', !fs.existsSync(usersFile));
+
+  const addUser = cli(['user', 'add', 'smokeadmin', '--password', 'smoke-password-1']);
+  check('user add creates an account', addUser.status === 0 && /created/.test(addUser.stdout), addUser.stdout + addUser.stderr);
+  check('the user database appears in the state directory', fs.existsSync(usersFile));
+  check('the user database is private (0600)',
+    (fs.statSync(usersFile).mode & 0o077) === 0, (fs.statSync(usersFile).mode & 0o777).toString(8));
+
+  const userList = cli(['user', 'list']);
+  check('user list shows the account', userList.stdout.includes('smokeadmin'), userList.stdout);
+  check('user list never prints the hash', !/scrypt\$/.test(userList.stdout + userList.stderr), userList.stdout);
+  check('user list --json is machine readable',
+    JSON.parse(cli(['user', 'list', '--json']).stdout)[0].name === 'smokeadmin');
+  check('a short password is refused',
+    cli(['user', 'add', 'weakling', '--password', 'short']).status === 1);
+  check('a duplicated name is refused',
+    cli(['user', 'add', 'smokeadmin', '--password', 'other-password-1']).status === 1);
+  check('an unknown user cannot be removed', cli(['user', 'rm', 'ghost']).status === 1);
+  check('an unknown user cannot be listed either', cli(['user', 'list']).stdout.includes('smokeadmin'));
+
+  // ======================================================= dashboard auth ====
+  section('dashboard auth');
+  const authPort = await freePort();
+  cli(['start', path.join(ROOT, 'examples', 'app.js'), '--name', 'guarded']);
+  await waitFor('the guarded app is up', () => Boolean(find('guarded')) && find('guarded').status === 'online');
+
+  const guardedWeb = cli(['web', '--port', String(authPort)]);
+  check('web reports that the login is required now', /auth: on \(1 user\)/.test(guardedWeb.stdout), guardedWeb.stdout + guardedWeb.stderr);
+
+  const anonPage = await get(`http://127.0.0.1:${authPort}/`);
+  check('an anonymous browser is redirected to /login',
+    anonPage.status === 302 && /^\/login\?next=/.test(anonPage.headers.location || ''), JSON.stringify([anonPage.status, anonPage.headers.location]));
+  check('the api refuses an anonymous caller with 401',
+    (await get(`http://127.0.0.1:${authPort}/api/processes`)).status === 401);
+  check('the login page is served with its own CSP',
+    (await get(`http://127.0.0.1:${authPort}/login`)).body.includes('procman · entrar'));
+
+  const guardedId = find('guarded').id;
+  const anonWrite = await post(`http://127.0.0.1:${authPort}/api/action/${guardedId}/stop`);
+  check('a write with neither session nor header is refused',
+    anonWrite.status === 401 || anonWrite.status === 403, String(anonWrite.status));
+
+  const wrongLogin = await post(`http://127.0.0.1:${authPort}/login`, { body: 'name=smokeadmin&password=nope-nope-nope' });
+  check('a wrong password is refused', wrongLogin.status === 401 && /inválidos/.test(wrongLogin.body), `${wrongLogin.status} ${wrongLogin.body.slice(0, 80)}`);
+  check('a wrong password hands out no cookie', !wrongLogin.headers['set-cookie']);
+
+  const login = await post(`http://127.0.0.1:${authPort}/login`, { body: 'name=smokeadmin&password=smoke-password-1' });
+  const cookieHeader = (login.headers['set-cookie'] || [''])[0];
+  const cookie = cookieHeader.split(';')[0];
+  check('a correct password logs in with a redirect', login.status === 302 && login.headers.location === '/', `${login.status} ${login.headers.location}`);
+  check('the session cookie is HttpOnly and SameSite=Strict',
+    /HttpOnly/.test(cookieHeader) && /SameSite=Strict/.test(cookieHeader), cookieHeader);
+  check('the session cookie carries an expiry', /Max-Age=\d+/.test(cookieHeader), cookieHeader);
+
+  check('the api answers an authenticated caller',
+    (await get(`http://127.0.0.1:${authPort}/api/processes`, { headers: { cookie } })).status === 200);
+  check('the page shows who is logged in',
+    (await get(`http://127.0.0.1:${authPort}/`, { headers: { cookie } })).body.includes('smokeadmin'));
+
+  check('an authenticated write without the header is still refused',
+    (await post(`http://127.0.0.1:${authPort}/api/action/${guardedId}/stop`, { headers: { cookie } })).status === 403);
+  const guardedPid = find('guarded').pid;
+  check('an authenticated, same-origin write works',
+    (await post(`http://127.0.0.1:${authPort}/api/action/${guardedId}/restart`,
+      { headers: { cookie, 'x-procman': '1' } })).status === 200);
+  check('that write really restarted the app', find('guarded').pid !== guardedPid);
+  startedPids.add(find('guarded').pid);
+
+  let throttled = null;
+  for (let i = 0; i < 6; i++) {
+    throttled = await post(`http://127.0.0.1:${authPort}/login`, { body: 'name=smokeadmin&password=still-wrong' });
+  }
+  check('repeated failures are rate limited', throttled.status === 429, String(throttled.status));
+  check('the correct password is refused while locked out',
+    (await post(`http://127.0.0.1:${authPort}/login`, { body: 'name=smokeadmin&password=smoke-password-1' })).status === 429);
+
+  const logout = await post(`http://127.0.0.1:${authPort}/logout`, { headers: { cookie } });
+  check('logout redirects and clears the cookie',
+    logout.status === 302 && /Max-Age=0/.test((logout.headers['set-cookie'] || [''])[0]), JSON.stringify(logout.headers['set-cookie']));
+  check('the old session stops working',
+    (await get(`http://127.0.0.1:${authPort}/api/processes`, { headers: { cookie } })).status === 401);
+
+  cli(['web', '--stop']);
+  check('removing the last user is reported', /no users left/.test(cli(['user', 'rm', 'smokeadmin']).stdout));
+  check('--auth without any user fails loudly', cli(['web', '--port', String(authPort), '--auth']).status === 1);
+  const reopened = cli(['web', '--port', String(authPort)]);
+  check('the dashboard opens again once no user is left', /auth: off \(no users\)/.test(reopened.stdout), reopened.stdout);
+  check('it answers without a session again', (await get(`http://127.0.0.1:${authPort}/`)).status === 200);
+  cli(['web', '--stop']);
+  cli(['delete', 'guarded']);
 
   // ============================================================== log follow ==
   section('logs --follow');
@@ -605,6 +743,10 @@ function hammer(url, durationMs, concurrency = 4) {
   process.exit(failed === 0 ? 0 : 1);
 })().catch((err) => {
   console.error('smoke test crashed:', err);
+  try {
+    console.error('--- daemon.log ---');
+    console.error(fs.readFileSync(path.join(HOME, 'daemon.log'), 'utf8').slice(-4000) || '(empty)');
+  } catch (ignored) { /* no log */ }
   console.error(`(${passed} passed, ${failed} failed before the crash)`);
   process.exit(1);
 });

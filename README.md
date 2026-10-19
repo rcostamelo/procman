@@ -17,7 +17,7 @@ Comandos:
 | Comando | O que faz |
 |---|---|
 | `start <arquivo\|config>` | sobe um script ou todos os apps de um ecosystem file |
-| `list` (`ls`) | lista os processos, com a porta que cada um abriu (`--json`, `--namespace`) |
+| `list` (`ls`, `status`) | lista os processos, com a porta que cada um abriu (`--json`, `--namespace`); `status` acrescenta um resumo |
 | `describe <nome\|id>` | todos os detalhes de um processo (JSON) |
 | `stop` / `restart` / `reload <nome\|id\|all>` | parada graciosa, reinício, reload sem downtime |
 | `delete <nome\|id\|all>` | para e esquece |
@@ -27,7 +27,8 @@ Comandos:
 | `save` / `resurrect` | persiste a lista / replay dela (usado no boot) |
 | `ping` | confirma que o daemon responde |
 | `kill` | para tudo e encerra o daemon |
-| `web` | dashboard HTTP embutido, só em loopback (`--port`, `--stop`) |
+| `web` | dashboard HTTP embutido, só em loopback (`--port`, `--stop`, `--auth`/`--no-auth`) |
+| `user` | contas do dashboard: `list`/`add`/`passwd`/`rm` (SQLite em `~/.procman/users.db`) |
 | `startup` | gera (ou instala com `--install`) a unidade de boot systemd/launchd |
 | `version` / `help` | versão e ajuda |
 
@@ -36,8 +37,8 @@ janela de indisponibilidade**, restart automático com orçamento de instabilida
 `--watch`, `--cron`, `--max-memory-restart`, `--wait-ready`, namespaces, ecosystem
 files, logs por app **com rotação por tamanho e gzip opcional**, streaming de logs,
 save/resurrect idempotente, boot via systemd/launchd, **descoberta automática da porta
-que cada app abre** (sem o app precisar avisar), um dashboard local e uma TUI
-(`monit`).
+que cada app abre** (sem o app precisar avisar), um dashboard local **com login**
+(usuários em SQLite, senha com scrypt) e uma TUI (`monit`).
 
 ## Instalando
 
@@ -58,6 +59,7 @@ Do clone, sem instalar nada — troque `procman` por `node bin/procman.js`:
 ```bash
 node bin/procman.js start ./examples/app.js --name web -- --label alpha
 node bin/procman.js list
+node bin/procman.js status         # a mesma tabela, com um resumo embaixo
 node bin/procman.js logs web --follow
 node bin/procman.js restart web
 node bin/procman.js delete web
@@ -190,17 +192,58 @@ parado não anuncia uma porta que não está mais escutando.
 
 ### Dashboard
 
-`procman web` sobe um dashboard em `127.0.0.1:9615` (só loopback, sem autenticação):
-tabela ordenável por qualquer coluna, filtro por nome/namespace/script, seleção por
-namespace, barra de memória quando há `--max-memory-restart`, pausa do refresh
-automático (que também para sozinho com a aba em segundo plano) e as ações `restart`,
-`stop`, `reload`, `scale`, `info` e `delete` na própria linha. Cada processo tem os logs
-ao vivo (com seguir/ir-ao-fim e linhas de erro destacadas) e um painel de detalhes
-(`cwd`, `args`, portas, arquivos de log).
+`procman web` sobe um dashboard em `127.0.0.1:9615` (loopback) com tabela ordenável por
+qualquer coluna, filtro por nome/namespace/script, seleção por namespace, barra de
+memória quando há `--max-memory-restart`, pausa do refresh automático (que também para
+sozinho com a aba em segundo plano) e as ações `restart`, `stop`, `reload`, `scale`,
+`info` e `delete` na própria linha. Cada processo tem os logs ao vivo (com
+seguir/ir-ao-fim e linhas de erro destacadas) e um painel de detalhes (`cwd`, `args`,
+portas, arquivos de log).
 
 A página é servida com `Cache-Control: no-store` e uma CSP restritiva com **nonce**
-(nada de `unsafe-inline` para script): mesmo sendo um serviço local sem autenticação,
-ela não executa script injetado.
+(nada de `unsafe-inline` para script), então ela não executa script injetado.
+
+### Acesso ao dashboard (usuários)
+
+O dashboard **passa a exigir login assim que existe um usuário**. Criar o primeiro é um
+comando:
+
+```bash
+procman user add admin          # pergunta a senha (sem eco), duas vezes
+procman web                     # dashboard on http://127.0.0.1:9615/ — auth: on (1 user)
+procman user list
+procman user passwd admin
+procman user rm admin           # sem usuários, o login volta a ser dispensado
+```
+
+A senha também pode vir de `--password <senha>` (aparece no histórico do shell e em
+`ps`) ou do stdin quando não há terminal (`echo senha | procman user add admin`).
+
+Como funciona:
+
+- Os usuários ficam em `~/.procman/users.db`, um **SQLite** — servido pelo próprio Node
+  (`node:sqlite`), então o projeto continua com zero dependências. Senhas são guardadas
+  como hash **scrypt** (salt aleatório por usuário) e nunca são exibidas nem
+  recuperáveis; `user list` mostra apenas nome, criação, último login e sessões ativas.
+- A sessão é um token aleatório de 32 bytes, gravado no banco com validade de 12h, e o
+  navegador só o vê como cookie `HttpOnly` + `SameSite=Strict` (+ `Secure` atrás de um
+  proxy HTTPS). Trocar a senha ou remover o usuário derruba as sessões dele na hora.
+- Toda chamada que **muda** algo (`/api/action/...`) exige um cabeçalho
+  `X-Procman: 1`. Um formulário de outro site não consegue definir cabeçalho, então a
+  ação é recusada (403) — e o `SameSite=Strict` já impede que o cookie viaje num POST
+  cross-site.
+- Erros repetidos de senha bloqueiam aquele nome por 60s depois de 5 tentativas (429),
+  com resposta de tempo constante para não revelar se o usuário existe.
+- O estado do login é relido a **cada request**: dá para criar ou remover usuários com o
+  dashboard no ar, sem reiniciar nada.
+
+Três modos: o padrão `auto` (login quando há usuário), `--auth` (sempre exige login, e
+falha se não houver usuário) e `--no-auth` (nunca exige). Sem usuários o dashboard abre
+normalmente e a página mostra um aviso; `--host` fora do loopback também avisa.
+
+Requer `node:sqlite` (Node >= 23.4; no Node 22.5+ com `--experimental-sqlite`). Nos
+Nodes mais antigos o resto do `procman` funciona e os comandos `user` falham com uma
+mensagem explicando o motivo.
 
 ### Quem pode subir o daemon
 
@@ -209,6 +252,7 @@ ela não executa script injetado.
 | `ping`, `start`, `resurrect`, `web` | sobe o daemon automaticamente |
 | `list` | imprime tabela vazia (`[]` no `--json`), não sobe nada |
 | `describe`, `stop`, `restart`, `reload`, `delete`, `scale`, `logs`, `monit`, `save`, `web --stop` | falha com `daemon is not running` |
+| `user ...` | não fala com o daemon: mexe direto no `users.db` |
 | `kill` | informa que não está rodando e sai com 0 |
 
 Comandos de leitura e de parada **não** criam daemon. `resurrect` cria, porque é ele
@@ -247,6 +291,7 @@ daemon.sock   endpoint IPC (named pipe no Windows)
 daemon.pid    pid do daemon
 daemon.log    stdout/stderr do daemon
 dump.json     lista salva por `save`, usada por `resurrect`
+users.db      usuários do dashboard (SQLite; criado só quando há usuário)
 logs/         <id>-<nome>-{out,err}.log  e, se rotacionado, <...>.log.<timestamp>[.gz]
 pids/         <id>-<nome>.pid  (um pid por linha, no cluster)
 ```
@@ -269,7 +314,8 @@ bin/procman.js
                        ├─ lib/treekill.js        mata a árvore de um worker
                        ├─ lib/ecosystem.js       ecosystem files (.js/.json)
                        ├─ lib/startup.js         systemd/launchd
-                       └─ lib/dashboard.js       dashboard HTTP (loopback)
+                       ├─ lib/users.js           usuários/sessões (SQLite do próprio Node)
+                       └─ lib/dashboard.js       dashboard HTTP (loopback) + login
    └─ lib/monit.js               TUI ao vivo (só leitura), fala com o daemon pelo client
 ```
 
@@ -292,6 +338,8 @@ Decisões que valem explicação:
 | Nome da geração com timestamp + sufixo | Um burst rotaciona várias vezes no mesmo segundo; sem o sufixo as gerações sobrescreveriam umas às outras. |
 | Prontidão por mensagem `ready` **e** por `listening` | São coisas diferentes: `listening` é fato do runtime (cluster), `ready` é declaração do app. O `--wait-ready` aceita as duas. |
 | `monit` é só leitura | Um monitor com botões de matar é um acidente esperando para acontecer; `stop`/`restart` ficam no CLI, onde o alvo é explícito. |
+| `node:sqlite` em vez de um driver | Um banco de verdade para usuários/sessões sem quebrar a promessa de zero dependências; em Node sem ele, só os comandos `user` reclamam. |
+| Sessão em cookie `HttpOnly` + `SameSite=Strict` | Sem JavaScript lendo o token e sem o navegador enviá-lo a partir de outro site; a escrita ainda exige um cabeçalho que um formulário não consegue forjar. |
 
 ### Concorrência e recuperação de socket
 
@@ -328,7 +376,7 @@ O teste assevera os `ECONNREFUSED` (devem ser 0) e apenas informa os resets.
 ## Testes
 
 ```bash
-npm run smoke     # 107 asserções end-to-end com PROCMAN_HOME descartável
+npm run smoke     # 166 asserções end-to-end com PROCMAN_HOME descartável
 ```
 
 O smoke cobre: subida/reuso do daemon, socket/pidfile, fork mode, logs em arquivo,
@@ -340,8 +388,14 @@ explícito sem contar como instável, `stop` sem restart, `delete`, passthrough 
 ECONNREFUSED**, `scale` para cima e para baixo, `--watch` (uma edição → um restart),
 `--max-memory-restart` (dispara e é throttled), parser de cron (incluindo rejeitar
 expressões inválidas), `save`/`kill`/`resurrect` idempotente, ecosystem file com
-`exec_mode: cluster` e namespace, geração da unidade de boot, dashboard (HTML, API com
-porta, ação de restart, stop, CSP com nonce), **descoberta da porta** (inclusive `port
+`exec_mode: cluster`, namespace e `instances: 'max'`, geração da unidade de boot,
+`status` como alias de `list` com resumo, dashboard (HTML, API com porta, ação de
+restart, stop, CSP com nonce, recusa de escrita sem o cabeçalho same-origin),
+**usuários e login** (`user add/list/passwd/rm`, banco 0600, hash nunca exposto,
+`users.db` só criado quando há usuário, redirect para `/login`, 401 na API sem sessão,
+cookie `HttpOnly`/`SameSite=Strict`, escrita autenticada só com `X-Procman`, lockout
+após 5 falhas, logout invalidando a sessão, `--auth` sem usuários falhando alto e o
+dashboard reabrindo quando o último usuário sai), **descoberta da porta** (inclusive `port
 0` e cluster com listener compartilhado reportando uma única porta, mais o ciclo
 stop/restart que a esquece e a redescobre), `logs --follow` entregando linhas ao vivo,
 **rotação de logs
@@ -397,9 +451,11 @@ node scripts/hammer.js http://127.0.0.1:3000/health 8000
 - **`logs` com `--no-merge-logs`**: o `--lines` é um orçamento para a resposta inteira,
   dividido entre as instâncias; a intercalação entre arquivos diferentes é por slot, não
   cronológica (não há timestamp global para ordenar).
-- **Dashboard sem autenticação**: escuta em `127.0.0.1` por padrão. Usar `--host`
-  diferente disso emite um aviso, e é responsabilidade de quem chamou. A página vai com
-  CSP de nonce e sem cache, mas a API em si não tem autenticação nenhuma.
+- **Dashboard sem usuário = sem login**: por padrão o dashboard só exige autenticação
+  depois que existe usuário (`procman user add`). Enquanto não houver nenhum, quem
+  alcança a porta manda nos processos — daí o aviso na própria página. `--auth` força o
+  login e `--no-auth` o desliga; o login usa scrypt + SQLite e não tem 2FA, então uma
+  senha fraca continua sendo uma senha fraca.
 - **Recursos do PM2 não implementados**: `startup` no Windows, `deploy`, módulos,
   `--watch` com globs, `log_date_format` com o formato `strftime` completo (aqui são
   tokens: `YYYY MM DD HH mm ss SSS ISO`), e o protocolo, que aqui é um JSON por linha
