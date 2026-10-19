@@ -88,6 +88,14 @@ Ecosystem file:
 node bin/procman.js start examples/ecosystem.config.js --env production
 ```
 
+O formato aceito é o mesmo do `ecosystem.config.js` original (`apps: [...]`, chaves
+em snake_case ou camelCase), então um arquivo escrito para o PM2 normalmente funciona
+sem alteração. Caminhos relativos dentro de um app são resolvidos contra o `cwd`
+**daquele app** — que por sua vez é relativo ao diretório do arquivo de configuração.
+Ou seja, `{ cwd: './backend', script: 'src/server.js' }` aponta para
+`<config>/backend/src/server.js`, como se espera. A exceção é `ignore_watch`, cujos
+itens são casados por substring do caminho absoluto (`node_modules`, `.git`).
+
 Visão ao vivo (TUI sem dependências; `q` sai, `c`/`m`/`n`/`i` ordenam, setas
 selecionam, e o painel de baixo segue os logs do processo selecionado):
 

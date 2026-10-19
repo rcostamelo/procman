@@ -381,20 +381,31 @@ function hammer(url, durationMs, concurrency = 4) {
   section('ecosystem file');
   const ecoPort = await freePort();
   const ecoFile = path.join(HOME, 'ecosystem.config.js');
+  // `eco-nested` exercises the common `{ cwd: './x', script: 'server.js' }`
+  // layout: the script must resolve against the app cwd, not the config file.
+  const ecoNested = path.join(HOME, 'nested');
+  fs.mkdirSync(ecoNested, { recursive: true });
+  fs.copyFileSync(path.join(ROOT, 'examples', 'app.js'), path.join(ecoNested, 'server.js'));
   fs.writeFileSync(ecoFile, `module.exports = { apps: [
     { name: 'eco-web', script: ${JSON.stringify(path.join(ROOT, 'examples', 'app.js'))}, args: '--label eco' },
     { name: 'eco-api', script: ${JSON.stringify(path.join(ROOT, 'examples', 'http.js'))},
-      exec_mode: 'cluster', instances: 2, args: ['--port', '${ecoPort}'], namespace: 'eco' }
+      exec_mode: 'cluster', instances: 2, args: ['--port', '${ecoPort}'], namespace: 'eco' },
+    { name: 'eco-nested', cwd: './nested', script: 'server.js' }
   ] };`);
   const ecoStart = cli(['start', ecoFile]);
-  check('starting an ecosystem file starts every app', /started 2 app/.test(ecoStart.stdout), ecoStart.stdout + ecoStart.stderr);
+  check('starting an ecosystem file starts every app', /started 3 app/.test(ecoStart.stdout), ecoStart.stdout + ecoStart.stderr);
   await waitFor('apps from the ecosystem file are online', () => {
     const a = find('eco-web');
     const b = find('eco-api');
-    return a && a.status === 'online' && b && b.status === 'online' && b.instances === 2;
+    const c = find('eco-nested');
+    return a && a.status === 'online' && b && b.status === 'online' && b.instances === 2 && c && c.status === 'online';
   });
   find('eco-web').pids.forEach((pid) => startedPids.add(pid));
   find('eco-api').pids.forEach((pid) => startedPids.add(pid));
+  find('eco-nested').pids.forEach((pid) => startedPids.add(pid));
+  check('a relative script resolves against the app cwd, not the config file',
+    find('eco-nested').cwd === ecoNested, JSON.stringify({ cwd: find('eco-nested').cwd, expected: ecoNested }));
+  await waitFor('a relative cwd is honoured and its app really serves', () => (find('eco-nested').ports || []).length === 1);
   check('exec_mode cluster is honoured', find('eco-api').mode === 'cluster');
   check('the namespace is applied', find('eco-api').namespace === 'eco');
   check('list --namespace filters', JSON.parse(cli(['list', '--json', '--namespace', 'eco']).stdout).length === 1);
