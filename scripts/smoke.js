@@ -23,7 +23,9 @@ const ROOT = path.join(__dirname, '..');
 const CLI = path.join(ROOT, 'bin', 'procman.js');
 const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'procman-smoke-'));
 const WATCHDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'procman-watch-'));
-const env = Object.assign({}, process.env, { PROCMAN_HOME: HOME });
+// PROCMAN_NO_BANNER keeps the first-run box out of every pty-based assertion;
+// the banner section below turns it back on deliberately.
+const env = Object.assign({}, process.env, { PROCMAN_HOME: HOME, PROCMAN_NO_BANNER: '1' });
 
 let passed = 0;
 let failed = 0;
@@ -918,6 +920,63 @@ function hammer(url, durationMs, concurrency = 4) {
   check('list works (and prints nothing) with no daemon', cli(['list', '--json']).stdout.trim() === '[]');
   check('stop does not resurrect a daemon', /daemon is not running/.test(cli(['stop', 'x']).stderr));
   check('no daemon was started by read-only commands', !fs.existsSync(path.join(HOME, 'daemon.sock')));
+
+  // ------------------------------------------------------- first-run banner --
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  check('package.json has no install scripts and ships the banner modules',
+    !['preinstall', 'install', 'postinstall'].some((key) => pkg.scripts[key]) &&
+    fs.existsSync(path.join(ROOT, 'lib', 'banner.js')) &&
+    fs.existsSync(path.join(ROOT, 'lib', 'welcome.js')));
+
+  // A fresh state dir per run, and no inherited opt-out: the marker is the
+  // thing under test.
+  const bannerEnv = Object.assign({}, env);
+  for (const key of ['CI', 'NO_COLOR', 'PROCMAN_NO_BANNER']) delete bannerEnv[key];
+  const freshHome = () => fs.mkdtempSync(path.join(os.tmpdir(), 'procman-first-'));
+
+  const pipedBanner = spawnSync(process.execPath, [CLI, 'list'],
+    { env: Object.assign({}, bannerEnv, { PROCMAN_HOME: freshHome() }), encoding: 'utf8' });
+  check('no banner when stdout is not a terminal',
+    pipedBanner.status === 0 && !pipedBanner.stdout.includes('rcostamelo/procman'));
+
+  if (spawnSync('script', ['--version'], { encoding: 'utf8' }).status === 0) {
+    const underPty = (args, extra = {}) => spawnSync('script',
+      ['-qec', `"${process.execPath}" "${CLI}" ${args}`, '/dev/null'],
+      { env: Object.assign({}, bannerEnv, extra), encoding: 'utf8', timeout: 15000 })
+      .stdout.replace(/\r/g, '');
+    const hasBox = (out) => out.includes('github.com/rcostamelo/procman');
+
+    const firstHomeDir = freshHome();
+    const first = underPty('list', { PROCMAN_HOME: firstHomeDir });
+    check('the first real command on a terminal shows the box',
+      hasBox(first) && first.includes(pkg.version));
+    check('...with the first commands and the links',
+      ['start', 'list', 'logs', 'save'].every((cmd) => first.includes(cmd)) &&
+      first.includes('npmjs.com/package/procmand'));
+    check('...in colour, on a colour terminal', first.includes('\x1b['));
+    check('...and the second run does not repeat it', !hasBox(underPty('list', { PROCMAN_HOME: firstHomeDir })));
+    check('...the marker lives in the state directory', fs.existsSync(path.join(firstHomeDir, '.welcomed')));
+
+    const jsonHome = freshHome();
+    const jsonRun = underPty('list --json', { PROCMAN_HOME: jsonHome });
+    check('--json never gets a banner in front of the payload', (() => {
+      if (hasBox(jsonRun)) return false;
+      try { return Array.isArray(JSON.parse(jsonRun.trim())); } catch (err) { return false; }
+    })());
+    check('...and --json does not burn the marker', !fs.existsSync(path.join(jsonHome, '.welcomed')));
+
+    const helpHome = freshHome();
+    check('the manual alone does not show the box', !hasBox(underPty('help', { PROCMAN_HOME: helpHome })));
+
+    const quietHome = freshHome();
+    check('PROCMAN_NO_BANNER silences the first run and keeps the marker unwritten',
+      !hasBox(underPty('list', { PROCMAN_HOME: quietHome, PROCMAN_NO_BANNER: '1' })) &&
+      !fs.existsSync(path.join(quietHome, '.welcomed')));
+
+    const greyHome = freshHome();
+    const grey = underPty('list', { PROCMAN_HOME: greyHome, NO_COLOR: '1' });
+    check('NO_COLOR gives the first-run box without escape codes', hasBox(grey) && !grey.includes('\x1b['));
+  }
 
   // ------------------------------------------------------------------- result -
   console.log(`\n# ${passed} passed, ${failed} failed`);

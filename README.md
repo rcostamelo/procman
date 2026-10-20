@@ -50,8 +50,13 @@ procman --help            # o comando continua sendo procman
 
 O pacote se chama `procmand` (o nome `procman` no npm já era de outro projeto), mas
 comando, diretório de estado (`~/.procman`) e prefixos de ambiente (`PROCMAN_*`)
-seguem `procman`. Não há `postinstall` nem `dependencies`: nada é baixado ou compilado
-na instalação, e `~/.procman` só aparece no primeiro uso.
+seguem `procman`. Não há `dependencies` nem scripts de instalação: nada é baixado,
+compilado ou executado no `npm install`, e `~/.procman` só aparece no primeiro uso.
+
+O banner de boas-vindas (versão, primeiros comandos e links) aparece **uma única vez**,
+no primeiro comando de verdade em um terminal — `procman list`, `procman start`, etc.
+(não em `help`, `version`, `monit` nem atrás de `--json`, e nunca fora de um terminal:
+CI, pipe e `> arquivo` ficam limpos). `PROCMAN_NO_BANNER=1` desliga de vez.
 
 Do clone, sem instalar nada — troque `procman` por `node bin/procman.js`:
 
@@ -412,7 +417,7 @@ O teste assevera os `ECONNREFUSED` (devem ser 0) e apenas informa os resets.
 ## Testes
 
 ```bash
-npm run smoke     # 224 asserções end-to-end com PROCMAN_HOME descartável
+npm run smoke     # 236 asserções end-to-end com PROCMAN_HOME descartável
 ```
 
 O smoke cobre: subida/reuso do daemon, socket/pidfile, fork mode, logs em arquivo,
