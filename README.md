@@ -235,7 +235,9 @@ chips de porta (cada uma um link), `watch`, `cron`, `sem restart` e nº de inst�
 Acima deles, quatro cards de resumo: apps (online/parados), CPU (com load average e nº
 de núcleos), memória (dos apps + uso da máquina) e restarts (com os instáveis). A API
 `/api/processes` devolve também `system` (`totalmem`, `freemem`, `cpus`, `loadavg`,
-`uptime`) e `now`.
+`uptime`) e `now`. Como o dashboard roda **dentro do daemon**, que carrega `lib/*.js`
+no seu start, um `npm i -g procmand@x` não muda a UI de um daemon já rodando: `procman
+web` detecta a versão diferente e imprime o `save && kill && resurrect` necessário.
 
 A tabela continua ordenável por qualquer coluna, com filtro por nome/namespace/script,
 seleção por namespace, barra de memória quando há `--max-memory-restart`, pausa do
@@ -428,7 +430,7 @@ O teste assevera os `ECONNREFUSED` (devem ser 0) e apenas informa os resets.
 ## Testes
 
 ```bash
-npm run smoke     # 240 asserções end-to-end com PROCMAN_HOME descartável
+npm run smoke     # 241 asserções end-to-end com PROCMAN_HOME descartável
 ```
 
 O smoke cobre: subida/reuso do daemon, socket/pidfile, fork mode, logs em arquivo,

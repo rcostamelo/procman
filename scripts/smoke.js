@@ -463,6 +463,7 @@ function hammer(url, durationMs, concurrency = 4) {
   });
   const webStart = cli(['web', '--port', String(webPort)]);
   check('the dashboard starts on the requested port', webStart.stdout.includes(`127.0.0.1:${webPort}`), webStart.stdout + webStart.stderr);
+  check('no version warning when CLI and daemon match', !/daemon is still running/.test(webStart.stderr), webStart.stderr);
   const apiPayload = JSON.parse((await get(`http://127.0.0.1:${webPort}/api/processes`)).body);
   check('the api lists processes', apiPayload.processes.length === 1 && apiPayload.processes[0].name === 'dash', JSON.stringify(apiPayload.processes));
   check('the api exposes the bound port', JSON.stringify(apiPayload.processes[0].ports) === JSON.stringify(find('dash').ports), JSON.stringify(apiPayload.processes[0].ports));
