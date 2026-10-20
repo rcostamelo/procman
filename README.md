@@ -225,13 +225,24 @@ parado não anuncia uma porta que não está mais escutando.
 
 ### Dashboard
 
-`procman web` sobe um dashboard em `127.0.0.1:9615` (loopback) com tabela ordenável por
-qualquer coluna, filtro por nome/namespace/script, seleção por namespace, barra de
-memória quando há `--max-memory-restart`, pausa do refresh automático (que também para
-sozinho com a aba em segundo plano) e as ações `restart`, `stop`, `reload`, `scale`,
-`info` e `delete` na própria linha. Cada processo tem os logs ao vivo (com
-seguir/ir-ao-fim e linhas de erro destacadas) e um painel de detalhes (`cwd`, `args`,
-portas, arquivos de log).
+`procman web` sobe um dashboard em `127.0.0.1:9615` (loopback) com duas visões, trocadas
+no toolbar e lembradas no `localStorage`: **cards** (o padrão) e **tabela**.
+
+Nos cards, cada app traz o badge de status (`online`, `errored`, …), namespace, modo,
+pid, uptime e restarts, mais medidores ao vivo de **CPU** e **memória** — a memória é
+medida contra o `--max-memory-restart` quando existe, senão contra a RAM da máquina — e
+chips de porta (cada uma um link), `watch`, `cron`, `sem restart` e nº de instâncias.
+Acima deles, quatro cards de resumo: apps (online/parados), CPU (com load average e nº
+de núcleos), memória (dos apps + uso da máquina) e restarts (com os instáveis). A API
+`/api/processes` devolve também `system` (`totalmem`, `freemem`, `cpus`, `loadavg`,
+`uptime`) e `now`.
+
+A tabela continua ordenável por qualquer coluna, com filtro por nome/namespace/script,
+seleção por namespace, barra de memória quando há `--max-memory-restart`, pausa do
+refresh automático (que também para sozinho com a aba em segundo plano) e as ações
+`restart`, `stop`, `reload`, `scale`, `info` e `delete` na própria linha. Cada processo
+tem os logs ao vivo (com seguir/ir-ao-fim e linhas de erro destacadas) e um painel de
+detalhes (`cwd`, `args`, portas, arquivos de log).
 
 A página é servida com `Cache-Control: no-store` e uma CSP restritiva com **nonce**
 (nada de `unsafe-inline` para script), então ela não executa script injetado.
@@ -417,7 +428,7 @@ O teste assevera os `ECONNREFUSED` (devem ser 0) e apenas informa os resets.
 ## Testes
 
 ```bash
-npm run smoke     # 236 asserções end-to-end com PROCMAN_HOME descartável
+npm run smoke     # 240 asserções end-to-end com PROCMAN_HOME descartável
 ```
 
 O smoke cobre: subida/reuso do daemon, socket/pidfile, fork mode, logs em arquivo,
@@ -430,8 +441,9 @@ ECONNREFUSED**, `scale` para cima e para baixo, `--watch` (uma edição → um r
 `--max-memory-restart` (dispara e é throttled), parser de cron (incluindo rejeitar
 expressões inválidas), `save`/`kill`/`resurrect` idempotente, ecosystem file com
 `exec_mode: cluster`, namespace e `instances: 'max'`, geração da unidade de boot,
-`status` como alias de `list` com resumo, dashboard (HTML, API com porta, ação de
-restart, stop, CSP com nonce, recusa de escrita sem o cabeçalho same-origin),
+`status` como alias de `list` com resumo, dashboard (HTML, API com porta e `system`, cards/badges/kpis renderizados
+de verdade num Chrome headless, ação de restart, stop, CSP com nonce, recusa de escrita
+sem o cabeçalho same-origin),
 **usuários e login** (`user add/list/passwd/rm`, banco 0600, hash nunca exposto,
 `users.db` só criado quando há usuário, redirect para `/login`, 401 na API sem sessão,
 cookie `HttpOnly`/`SameSite=Strict`, escrita autenticada só com `X-Procman`, lockout

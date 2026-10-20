@@ -466,9 +466,37 @@ function hammer(url, durationMs, concurrency = 4) {
   const apiPayload = JSON.parse((await get(`http://127.0.0.1:${webPort}/api/processes`)).body);
   check('the api lists processes', apiPayload.processes.length === 1 && apiPayload.processes[0].name === 'dash', JSON.stringify(apiPayload.processes));
   check('the api exposes the bound port', JSON.stringify(apiPayload.processes[0].ports) === JSON.stringify(find('dash').ports), JSON.stringify(apiPayload.processes[0].ports));
+  check('the api adds machine-wide numbers for the cards',
+    !!apiPayload.system && apiPayload.system.totalmem > 0 && apiPayload.system.freemem > 0 &&
+    apiPayload.system.cpus > 0 && Array.isArray(apiPayload.system.loadavg) &&
+    typeof apiPayload.now === 'number',
+    JSON.stringify(apiPayload.system));
   const dashPage = await get(`http://127.0.0.1:${webPort}/`);
   check('the html page is served', dashPage.body.includes('<table>'));
   check('the page has a port column', dashPage.body.includes('data-sort="port"'));
+  check('the page ships the summary cards and the view toggle',
+    dashPage.body.includes('id="kpis"') && dashPage.body.includes('id="cards"') &&
+    dashPage.body.includes('id="view-cards"') && dashPage.body.includes('id="view-table"'));
+  check('the page renders badges and cpu/memory meters',
+    dashPage.body.includes('class="badge ') && dashPage.body.includes('class="meter"') &&
+    dashPage.body.includes('function renderCards'));
+
+  // Optional: only where a headless browser exists. This is the check that
+  // catches a client-side crash — the markup can be present and the page blank.
+  const chromeBin = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
+    .map((bin) => spawnSync('sh', ['-c', `command -v ${bin}`], { encoding: 'utf8' }).stdout.trim())
+    .filter(Boolean)[0];
+  if (chromeBin) {
+    const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'procman-chrome-'));
+    const dump = spawnSync(chromeBin, ['--headless=new', '--no-sandbox', '--disable-gpu',
+      '--user-data-dir=' + profile, '--virtual-time-budget=4000', '--dump-dom',
+      `http://127.0.0.1:${webPort}/`], { encoding: 'utf8', timeout: 60000 });
+    const dom = dump.stdout || '';
+    check('the browser really renders one card per app, with the kpis',
+      dom.includes('class="card status-online"') && dom.includes('>dash<') && dom.includes('class="kpi"'),
+      dom.slice(0, 200));
+    fs.rmSync(profile, { recursive: true, force: true });
+  }
   check('the page ships a nonce-based CSP and no-store',
     /script-src 'nonce-[^']+'/.test(dashPage.headers['content-security-policy'] || '') &&
     /<script nonce="[^"]+">/.test(dashPage.body) &&
